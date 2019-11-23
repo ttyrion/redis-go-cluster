@@ -15,7 +15,8 @@
 package redis
 
 import (
-    "fmt"
+	"fmt"
+	"sync"
 )
 
 type multiTask struct {
@@ -132,7 +133,7 @@ func (cluster *Cluster) multiGet(cmd string, args ...interface{}) (interface{}, 
 		slot: slot,
 		cmd: cmd,
 		args: []interface{}{args[i]},
-		done: make(chan int),
+		// done: make(chan int),
 	    }
 	    tasks = append(tasks, task)
 	    index[i] = tasks[j]
@@ -140,13 +141,16 @@ func (cluster *Cluster) multiGet(cmd string, args ...interface{}) (interface{}, 
     }
     cluster.rwLock.RUnlock()
 
+	wg := sync.WaitGroup{}
+	wg.Add(len(tasks))
     for i := range tasks {
-	go handleGetTask(tasks[i])
+		go handleGetTask(tasks[i], &wg)
     }
 
-    for i := range tasks {
-	<-tasks[i].done
-    }
+    // for i := range tasks {
+	// 	<-tasks[i].done
+	// }
+	wg.Wait()
 
     reply := make([]interface{}, len(args))
     for i := range reply {
@@ -170,7 +174,8 @@ func handleSetTask(task *multiTask) {
     task.done <- 1
 }
 
-func handleGetTask(task *multiTask) {
+func handleGetTask(task *multiTask, wg *sync.WaitGroup) {
     task.replies, task.err = Values(task.node.do(task.cmd, task.args...))
-    task.done <- 1
+	// task.done <- 1
+	wg.Done()
 }
