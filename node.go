@@ -95,8 +95,8 @@ func (node *redisNode) getConn() (*redisConn, error) {
 	}
 
     if node.conns.Len() <= 0 {
-        currentAliveConns := atomic.LoadInt32(&node.aliveCount)
-        if int(currentAliveConns) >= node.keepAlive {
+        currentAliveConns := int(atomic.LoadInt32(&node.aliveCount))
+        if currentAliveConns >= node.keepAlive {
             return nil, errors.New("node conns runout")
         }
 
@@ -136,8 +136,8 @@ func (node *redisNode) releaseConn(conn *redisConn) {
         return
     }
 
-    currentAliveConns := atomic.LoadInt32(&node.aliveCount)
-    if int(currentAliveConns) >= node.keepAlive || node.aliveTime <= 0 {
+    currentAliveConns := int(atomic.LoadInt32(&node.aliveCount))
+    if currentAliveConns >= node.keepAlive || node.aliveTime <= 0 {
         conn.shutdown()
         atomic.AddInt32(&node.aliveCount, -1)
         return
