@@ -19,7 +19,6 @@ import (
     "fmt"
     "net"
     "sync"
-    "sync/atomic"
     "time"
     "bufio"
     "errors"
@@ -40,6 +39,9 @@ type redisConn struct {
 
     // Pending replies to be read in redis pipeling.
     pending	int
+
+    // state 
+    valid bool
 
     // Scratch space for formatting argument length.
     lenScratch [32]byte
@@ -73,9 +75,8 @@ type redisNode struct {
 
 func (node *redisNode) getConn() (*redisConn, error) {
     node.mutex.Lock()
-
+    defer node.mutex.Unlock()
     if node.closed {
-        node.mutex.Unlock()
         return nil, fmt.Errorf("getConn: connection has been closed")
     }
 
@@ -91,16 +92,13 @@ func (node *redisNode) getConn() (*redisConn, error) {
 	    }
         node.conns.Remove(elem)
         conn.shutdown()
-        atomic.AddInt32(&node.aliveCount, -1)
+        node.aliveCount--
 	}
 
     if node.conns.Len() <= 0 {
-        currentAliveConns := int(atomic.LoadInt32(&node.aliveCount))
-        if currentAliveConns >= node.keepAlive {
+        if int(node.aliveCount) >= node.keepAlive {
             return nil, errors.New("node conns runout")
         }
-
-	    node.mutex.Unlock()
 
         c, err := net.DialTimeout("tcp", node.address, node.connTimeout)
         if err != nil {
@@ -109,18 +107,18 @@ func (node *redisNode) getConn() (*redisConn, error) {
 
         conn := &redisConn{
             c: c,
+            valid: true,
             br: bufio.NewReader(c),
             bw: bufio.NewWriter(c),
             readTimeout: node.readTimeout,
             writeTimeout: node.writeTimeout,
         }
-        atomic.AddInt32(&node.aliveCount, 1)
+        node.aliveCount++
         return conn, nil
     }
 
     elem := node.conns.Back()
     node.conns.Remove(elem)
-    node.mutex.Unlock()
 
     return elem.Value.(*redisConn), nil
 }
@@ -129,17 +127,22 @@ func (node *redisNode) releaseConn(conn *redisConn) {
     node.mutex.Lock()
     defer node.mutex.Unlock()
 
-    // Connection still has pending replies, just close it.
-    if conn.pending > 0 || node.closed {
+    if conn.valid == false {
         conn.shutdown()
-        atomic.AddInt32(&node.aliveCount, -1)
+        node.aliveCount--
         return
     }
 
-    currentAliveConns := int(atomic.LoadInt32(&node.aliveCount))
-    if currentAliveConns >= node.keepAlive || node.aliveTime <= 0 {
+    // Connection still has pending replies, just close it.
+    if conn.pending > 0 || node.closed {
         conn.shutdown()
-        atomic.AddInt32(&node.aliveCount, -1)
+        node.aliveCount--
+        return
+    }
+
+    if int(node.aliveCount) >= node.keepAlive || node.aliveTime <= 0 {
+        conn.shutdown()
+        node.aliveCount--
         return
     }
 
@@ -166,7 +169,7 @@ func (node *redisNode) shutdown() {
         node.conns.Remove(elem)
     }
 
-    atomic.StoreInt32(&node.aliveCount, 0)
+    node.aliveCount = 0
     node.closed = true
 }
 
@@ -215,27 +218,24 @@ func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) 
     if err != nil {
 	    return redisError("ECONNTIMEOUT"), nil
     }
+    
+    defer node.releaseConn(conn)
 
     if err = conn.send(cmd, args...); err != nil {
-        conn.shutdown()
-        atomic.AddInt32(&node.aliveCount, -1)
+        conn.valid = false
         return nil, err
     }
 
     if err = conn.flush(); err != nil {
-        conn.shutdown()
-        atomic.AddInt32(&node.aliveCount, -1)
+        conn.valid = false
         return nil, err
     }
 
     reply, err := conn.receive()
     if err != nil {
-        conn.shutdown()
-        atomic.AddInt32(&node.aliveCount, -1)
+        conn.valid = false
         return nil, err
     }
-
-    node.releaseConn(conn)
 
     return reply, err
 }
