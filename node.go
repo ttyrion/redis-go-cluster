@@ -19,6 +19,7 @@ import (
     "fmt"
     "net"
     "sync"
+    "sync/atomic"
     "time"
     "bufio"
     "errors"
@@ -50,7 +51,11 @@ type redisConn struct {
 type redisNode struct {
     address	    string
 
+    // connections in pool
     conns	    list.List
+    // count of alive connections right now (including connections in pool and being removed from pool but not shutdown)
+    aliveCount      int32
+
     keepAlive	    int
     // the time period when a releasing conn should keep alivec before being released
     aliveTime	    time.Duration
@@ -86,9 +91,15 @@ func (node *redisNode) getConn() (*redisConn, error) {
 	    }
         node.conns.Remove(elem)
         conn.shutdown()
+        atomic.AddInt32(&node.aliveCount, -1)
 	}
 
     if node.conns.Len() <= 0 {
+        currentAliveConns := atomic.LoadInt32(&node.aliveCount)
+        if int(currentAliveConns) >= node.keepAlive {
+            return nil, errors.New("node conns runout")
+        }
+
 	    node.mutex.Unlock()
 
         c, err := net.DialTimeout("tcp", node.address, node.connTimeout)
@@ -103,7 +114,7 @@ func (node *redisNode) getConn() (*redisConn, error) {
             readTimeout: node.readTimeout,
             writeTimeout: node.writeTimeout,
         }
-
+        atomic.AddInt32(&node.aliveCount, 1)
         return conn, nil
     }
 
@@ -120,13 +131,16 @@ func (node *redisNode) releaseConn(conn *redisConn) {
 
     // Connection still has pending replies, just close it.
     if conn.pending > 0 || node.closed {
-	conn.shutdown()
-	return
+        conn.shutdown()
+        atomic.AddInt32(&node.aliveCount, -1)
+        return
     }
 
-    if node.conns.Len() >= node.keepAlive || node.aliveTime <= 0 {
-	conn.shutdown()
-	return
+    currentAliveConns := atomic.LoadInt32(&node.aliveCount)
+    if int(currentAliveConns) >= node.keepAlive || node.aliveTime <= 0 {
+        conn.shutdown()
+        atomic.AddInt32(&node.aliveCount, -1)
+        return
     }
 
     conn.t = time.Now()
@@ -142,16 +156,17 @@ func (node *redisNode) shutdown() {
     defer node.mutex.Unlock()
 
     for {
-	elem := node.conns.Back()
-	if elem == nil {
-	    break
-	}
+        elem := node.conns.Back()
+        if elem == nil {
+            break
+	    }
 
-	conn := elem.Value.(*redisConn)
-	conn.c.Close()
-	node.conns.Remove(elem)
+        conn := elem.Value.(*redisConn)
+        conn.shutdown()
+        node.conns.Remove(elem)
     }
 
+    atomic.StoreInt32(&node.aliveCount, 0)
     node.closed = true
 }
 
@@ -198,23 +213,26 @@ func (conn *redisConn) receive() (interface{}, error) {
 func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) {
     conn, err := node.getConn()
     if err != nil {
-	return redisError("ECONNTIMEOUT"), nil
+	    return redisError("ECONNTIMEOUT"), nil
     }
 
     if err = conn.send(cmd, args...); err != nil {
-	conn.shutdown()
-	return nil, err
+        conn.shutdown()
+        atomic.AddInt32(&node.aliveCount, -1)
+        return nil, err
     }
 
     if err = conn.flush(); err != nil {
-	conn.shutdown()
-	return nil, err
+        conn.shutdown()
+        atomic.AddInt32(&node.aliveCount, -1)
+        return nil, err
     }
 
     reply, err := conn.receive()
     if err != nil {
-	conn.shutdown()
-	return nil, err
+        conn.shutdown()
+        atomic.AddInt32(&node.aliveCount, -1)
+        return nil, err
     }
 
     node.releaseConn(conn)
