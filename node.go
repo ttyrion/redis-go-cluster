@@ -83,7 +83,8 @@ func (node *redisNode) getConn() (*redisConn, error) {
 	    if conn.t.Add(node.aliveTime).After(time.Now()) {
 		break
 	    }
-	    node.conns.Remove(elem)
+        node.conns.Remove(elem)
+        conn.shutdown()
 	}
     }
 
