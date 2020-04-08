@@ -70,43 +70,41 @@ func (node *redisNode) getConn() (*redisConn, error) {
     node.mutex.Lock()
 
     if node.closed {
-	node.mutex.Unlock()
-	return nil, fmt.Errorf("getConn: connection has been closed")
+        node.mutex.Unlock()
+        return nil, fmt.Errorf("getConn: connection has been closed")
     }
 
     // remove stale connections
-    if node.connTimeout > 0 {
-	for {
+    for {
 	    elem := node.conns.Back()
 	    if elem == nil {
-		break
+		    break
 	    }
 	    conn := elem.Value.(*redisConn)
 	    if conn.t.Add(node.aliveTime).After(time.Now()) {
-		break
+		    break
 	    }
         node.conns.Remove(elem)
         conn.shutdown()
 	}
-    }
 
     if node.conns.Len() <= 0 {
-	node.mutex.Unlock()
+	    node.mutex.Unlock()
 
-	c, err := net.DialTimeout("tcp", node.address, node.connTimeout)
-	if err != nil {
-	    return nil, err
-	}
+        c, err := net.DialTimeout("tcp", node.address, node.connTimeout)
+        if err != nil {
+            return nil, err
+        }
 
-	conn := &redisConn{
-	    c: c,
-	    br: bufio.NewReader(c),
-	    bw: bufio.NewWriter(c),
-	    readTimeout: node.readTimeout,
-	    writeTimeout: node.writeTimeout,
-	}
+        conn := &redisConn{
+            c: c,
+            br: bufio.NewReader(c),
+            bw: bufio.NewWriter(c),
+            readTimeout: node.readTimeout,
+            writeTimeout: node.writeTimeout,
+        }
 
-	return conn, nil
+        return conn, nil
     }
 
     elem := node.conns.Back()
