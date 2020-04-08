@@ -28,6 +28,7 @@ import (
 
 type redisConn struct {
     c	net.Conn
+    // the time when releaseConn() is called with this conn
     t	time.Time
 
     br	*bufio.Reader
@@ -51,6 +52,7 @@ type redisNode struct {
 
     conns	    list.List
     keepAlive	    int
+    // the time period when a releasing conn should keep alivec before being released
     aliveTime	    time.Duration
 
     connTimeout	    time.Duration
